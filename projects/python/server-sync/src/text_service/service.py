@@ -8,20 +8,84 @@ import threading
 from dataclasses import dataclass, field
 from typing import Any
 
+# Texts are measured in UTF-8 bytes, not characters. Echo shares this limit.
+MAX_TEXT_BYTES = 65_536
+
+# Text names are 1-64 ASCII letters, digits, underscores or hyphens.
+TEXT_NAME = re.compile(r"[A-Za-z0-9_-]{1,64}")
+
 ROUTES = (
     ("GET", "/ping"),
+    ("POST", "/echo"),
     ("POST", "/users"),
     ("POST", "/sessions"),
     ("DELETE", "/sessions/current"),
     ("GET", "/texts"),
+    ("PUT", "/texts/{name}"),
+    ("GET", "/texts/{name}"),
 )
 
 
+TEXT_PREFIX = "/texts/"
+INVALID_NAME: tuple[int, dict[str, Any]] = (400, {"message": "Invalid text name"})
+TEXT_MISSING: tuple[int, dict[str, Any]] = (404, {"message": "Text not found"})
+
+
+def match_route(method: str, path: str) -> tuple[int | None, str | None]:
+    """Match a request against ROUTES.
+
+    Returns ``(error_status, path_parameter)``. ``error_status`` is ``None``
+    when the route matched, and ``path_parameter`` holds ``{name}`` if present.
+    """
+    known = False
+    for verb, route in ROUTES:
+        if route == path:
+            if verb == method:
+                return None, None
+            known = True
+            continue
+        if route.endswith("/{name}") and path.startswith(TEXT_PREFIX):
+            candidate = path[len(TEXT_PREFIX) :]
+            if "/" not in candidate:
+                if verb == method:
+                    return None, candidate
+                # Keep scanning: a later route may still accept this method.
+                known = True
+    return (405 if known else 404), None
+
+
 def route_error(method: str, path: str) -> int | None:
-    allowed = next((verb for verb, route in ROUTES if route == path), None)
-    if allowed is None:
-        return 404
-    return None if method == allowed else 405
+    """Return the status for an unmatched route, or ``None`` when matched."""
+    status, _ = match_route(method, path)
+    return status
+
+
+BAD_TEXT_FIELD: tuple[int, dict[str, Any]] = (
+    400,
+    {"message": "Expected only the string field text"},
+)
+TEXT_TOO_LARGE: tuple[int, dict[str, Any]] = (
+    413,
+    {"message": "Text exceeds 65536 UTF-8 bytes"},
+)
+
+
+def validate_text_body(body: Any) -> tuple[int, dict[str, Any]] | None:
+    """Validate a ``{"text": str}`` payload.
+
+    Returns ``None`` when the payload is acceptable, otherwise the error
+    response to send. Shared by echo and PUT /texts/{name}.
+    """
+    if not isinstance(body, dict) or set(body) != {"text"} or not isinstance(body["text"], str):
+        return BAD_TEXT_FIELD
+    try:
+        encoded = body["text"].encode("utf-8")
+    except UnicodeEncodeError:
+        # Lone surrogates survive JSON decoding but are not valid text.
+        return BAD_TEXT_FIELD
+    if len(encoded) > MAX_TEXT_BYTES:
+        return TEXT_TOO_LARGE
+    return None
 
 
 @dataclass
@@ -40,10 +104,15 @@ class Service:
     def handle(
         self, method: str, path: str, body: Any, authorization: str
     ) -> tuple[int, dict[str, Any]]:
-        if status := route_error(method, path):
+        status, name = match_route(method, path)
+        if status is not None:
             return status, {"message": "Not found" if status == 404 else "Method not allowed"}
         if method == "GET" and path == "/ping":
             return 200, {"data": "pong"}
+        if method == "POST" and path == "/echo":
+            if error := validate_text_body(body):
+                return error
+            return 200, {"data": body["text"]}
         if path in ("/users", "/sessions") and method == "POST":
             if not isinstance(body, dict) or set(body) != {"username", "password"}:
                 return 400, {"message": "Expected username and password"}
@@ -80,19 +149,31 @@ class Service:
                 user.token = secrets.token_urlsafe(32)
                 # Later server task: record a deadline and return expires_in.
                 return 200, {"data": {"token": user.token}}
-        protected = path in ("/texts", "/sessions/current")
-        if protected:
-            token = (
-                authorization.removeprefix("Bearer ") if authorization.startswith("Bearer ") else ""
-            )
-            with self.lock:
-                user = next((u for u in self.users.values() if token and u.token == token), None)
-                if user is None:
-                    return 401, {"message": "Login required"}
-                # Later server task: check token expiry here, before reading or modifying state.
-                if path == "/sessions/current" and method == "DELETE":
-                    user.token = None
+        # The text name is checked before authentication, matching the
+        # reference program: an ill-formed name is 400 even without a token.
+        if name is not None and not TEXT_NAME.fullmatch(name):
+            return INVALID_NAME
+        token = (
+            authorization.removeprefix("Bearer ") if authorization.startswith("Bearer ") else ""
+        )
+        with self.lock:
+            user = next((u for u in self.users.values() if token and u.token == token), None)
+            if user is None:
+                return 401, {"message": "Login required"}
+            # Later server task: check token expiry here, before reading or modifying state.
+            if path == "/sessions/current" and method == "DELETE":
+                user.token = None
+                return 200, {"data": None}
+            if path == "/texts" and method == "GET":
+                return 200, {"data": sorted(user.texts)}
+            if name is not None:
+                if method == "PUT":
+                    if error := validate_text_body(body):
+                        return error
+                    user.texts[name] = body["text"]
                     return 200, {"data": None}
-                if path == "/texts" and method == "GET":
-                    return 200, {"data": sorted(user.texts)}
+                if name not in user.texts:
+                    return TEXT_MISSING
+                if method == "GET":
+                    return 200, {"data": user.texts[name]}
         return 404, {"message": "Not found"}

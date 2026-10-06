@@ -23,6 +23,28 @@ async def client() -> AsyncGenerator[AsyncClient]:
         yield client
 
 
+async def test_http_account_flow(client: AsyncClient) -> None:
+    """Task 1: the same account flow, seen through real HTTP requests."""
+    assert (await client.get("/ping")).json() == {"data": "pong"}
+    account = {"username": "alice", "password": "password1"}
+    assert (await client.post("/users", json=account)).status_code == 201
+    assert (await client.post("/users", json=account)).status_code == 409
+    assert (
+        await client.post("/sessions", json={**account, "password": "wrongpassword"})
+    ).status_code == 401
+
+    token = (await client.post("/sessions", json=account)).json()["data"]["token"]
+    headers = {"Authorization": f"Bearer {token}"}
+    assert (await client.get("/texts", headers=headers)).json() == {"data": []}
+
+    # A token without the Bearer prefix carries no identity.
+    assert (await client.get("/texts", headers={"Authorization": token})).status_code == 401
+    assert (await client.get("/texts")).status_code == 401
+
+    assert (await client.delete("/sessions/current", headers=headers)).status_code == 200
+    assert (await client.get("/texts", headers=headers)).status_code == 401
+
+
 async def test_http_routes(client: AsyncClient) -> None:
     assert (await client.get("/ping")).status_code == 200
     response = await client.post("/users", json={"username": "alice", "password": "password1"})

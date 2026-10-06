@@ -17,6 +17,18 @@ def test_account_lifecycle() -> None:
     assert service.handle("GET", "/texts", None, f"Bearer {next_token}")[0] == 401
 
 
+def test_token_header_forms() -> None:
+    """Task 1: only a ``Bearer`` token identifies a user."""
+    service = Service()
+    account = {"username": "alice", "password": "password1"}
+    assert service.handle("POST", "/users", account, "")[0] == 201
+    token = service.handle("POST", "/sessions", account, "")[1]["data"]["token"]
+    assert service.handle("GET", "/texts", None, f"Bearer {token}") == (200, {"data": []})
+    # A bare token, an empty header and other schemes all carry no identity.
+    for header in (token, "", "Bearer ", f"Basic {token}", "bearer " + token):
+        assert service.handle("GET", "/texts", None, header)[0] == 401
+
+
 def test_validation() -> None:
     service = Service()
     for body in (
