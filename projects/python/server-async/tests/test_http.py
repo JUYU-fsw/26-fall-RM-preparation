@@ -62,6 +62,28 @@ async def test_http_echo_rejects_bad_payloads(client: AsyncClient) -> None:
     assert (await client.post("/echo", content=b"not JSON")).status_code == 400
 
 
+async def test_http_text_round_trip(client: AsyncClient) -> None:
+    """Task 3: upload and read a named text over real HTTP."""
+    account = {"username": "alice", "password": "password1"}
+    await client.post("/users", json=account)
+    token = (await client.post("/sessions", json=account)).json()["data"]["token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    response = await client.put("/texts/note", headers=headers, json={"text": "hello"})
+    assert response.status_code == 200
+    assert (await client.get("/texts/note", headers=headers)).json() == {"data": "hello"}
+    assert (await client.get("/texts/note")).status_code == 401
+
+    # An ill-formed name is rejected before the token is ever inspected.
+    assert (await client.get("/texts/n@me")).status_code == 400
+    assert (await client.get("/texts/a/b")).status_code == 404
+    assert (await client.get("/texts/missing", headers=headers)).status_code == 404
+    assert (await client.put("/texts/note", headers=headers, json={"text": 42})).status_code == 400
+
+    # DELETE is still pending (task 4): the route is known, so this is 405.
+    assert (await client.delete("/texts/note", headers=headers)).status_code == 405
+
+
 async def test_http_routes(client: AsyncClient) -> None:
     assert (await client.get("/ping")).status_code == 200
     response = await client.post("/users", json={"username": "alice", "password": "password1"})
@@ -103,9 +125,6 @@ async def test_body_limit_and_routing(client: AsyncClient) -> None:
     ("method", "path"),
     [
         ("DELETE", "/users/me"),
-        ("PUT", "/texts/note"),
-        ("GET", "/texts/note"),
-        ("DELETE", "/texts/note"),
     ],
 )
 async def test_unimplemented_routes_are_absent(client: AsyncClient, method: str, path: str) -> None:

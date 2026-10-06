@@ -50,6 +50,52 @@ def test_echo_limit_counts_bytes() -> None:
     assert service.handle("POST", "/echo", {"text": "😀" * 16_385}, "")[0] == 413
 
 
+def test_text_round_trip() -> None:
+    """Task 3: upload, overwrite and read a named text."""
+    service = Service()
+    account = {"username": "alice", "password": "password1"}
+    assert service.handle("POST", "/users", account, "")[0] == 201
+    token = service.handle("POST", "/sessions", account, "")[1]["data"]["token"]
+    auth = f"Bearer {token}"
+
+    assert service.handle("PUT", "/texts/note", {"text": "hello"}, auth) == (200, {"data": None})
+    assert service.handle("GET", "/texts/note", None, auth) == (200, {"data": "hello"})
+    assert service.handle("PUT", "/texts/note", {"text": "again"}, auth)[0] == 200
+    assert service.handle("GET", "/texts/note", None, auth) == (200, {"data": "again"})
+    assert service.handle("GET", "/texts", None, auth) == (200, {"data": ["note"]})
+
+
+def test_text_name_is_checked_before_authentication() -> None:
+    """Task 3: an ill-formed name is 400 even with no token at all."""
+    service = Service()
+    # Ill-formed name: rejected before the token is ever inspected.
+    assert service.handle("GET", "/texts/n@me", None, "")[0] == 400
+    # Well-formed but unknown name: the missing token is what matters.
+    assert service.handle("GET", "/texts/missing", None, "")[0] == 401
+    # A name containing a slash does not match the route shape at all.
+    assert service.handle("GET", "/texts/a/b", None, "")[0] == 404
+
+
+def test_text_isolation_between_accounts() -> None:
+    """Task 3: each account only sees its own texts."""
+    service = Service()
+    for name in ("alice", "bob"):
+        account = {"username": name, "password": "password1"}
+        assert service.handle("POST", "/users", account, "")[0] == 201
+    tokens = {
+        name: service.handle("POST", "/sessions", {"username": name, "password": "password1"}, "")[
+            1
+        ]["data"]["token"]
+        for name in ("alice", "bob")
+    }
+    assert (
+        service.handle("PUT", "/texts/note", {"text": "alice text"}, f"Bearer {tokens['alice']}")[0]
+        == 200
+    )
+    assert service.handle("GET", "/texts", None, f"Bearer {tokens['bob']}") == (200, {"data": []})
+    assert service.handle("GET", "/texts/note", None, f"Bearer {tokens['bob']}")[0] == 404
+
+
 def test_validation() -> None:
     service = Service()
     for body in (
