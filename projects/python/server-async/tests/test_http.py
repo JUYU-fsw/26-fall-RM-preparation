@@ -80,8 +80,25 @@ async def test_http_text_round_trip(client: AsyncClient) -> None:
     assert (await client.get("/texts/missing", headers=headers)).status_code == 404
     assert (await client.put("/texts/note", headers=headers, json={"text": 42})).status_code == 400
 
-    # DELETE is still pending (task 4): the route is known, so this is 405.
-    assert (await client.delete("/texts/note", headers=headers)).status_code == 405
+
+async def test_http_text_deletion(client: AsyncClient) -> None:
+    """Task 4: deleting a text removes it from the list over real HTTP."""
+    account = {"username": "alice", "password": "password1"}
+    await client.post("/users", json=account)
+    token = (await client.post("/sessions", json=account)).json()["data"]["token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    await client.put("/texts/alpha", headers=headers, json={"text": "a"})
+    await client.put("/texts/beta", headers=headers, json={"text": "b"})
+    assert (await client.get("/texts", headers=headers)).json() == {"data": ["alpha", "beta"]}
+
+    response = await client.delete("/texts/alpha", headers=headers)
+    assert response.status_code == 200
+    assert response.json() == {"data": None}
+    assert (await client.get("/texts", headers=headers)).json() == {"data": ["beta"]}
+    assert (await client.delete("/texts/alpha", headers=headers)).status_code == 404
+    assert (await client.delete("/texts/missing", headers=headers)).status_code == 404
+    assert (await client.delete("/texts/beta")).status_code == 401
 
 
 async def test_http_routes(client: AsyncClient) -> None:

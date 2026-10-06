@@ -23,6 +23,7 @@ ROUTES = (
     ("GET", "/texts"),
     ("PUT", "/texts/{name}"),
     ("GET", "/texts/{name}"),
+    ("DELETE", "/texts/{name}"),
 )
 
 TEXT_PREFIX = "/texts/"
@@ -173,4 +174,7 @@ class Service:
                     return TEXT_MISSING
                 if method == "GET":
                     return 200, {"data": user.texts[name]}
+                # 走到这里只剩 DELETE：文本确认存在，删除并返回 200。
+                del user.texts[name]
+                return 200, {"data": None}
         return 404, {"message": "Not found"}

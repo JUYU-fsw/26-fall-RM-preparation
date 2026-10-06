@@ -96,6 +96,65 @@ def test_text_isolation_between_accounts() -> None:
     assert service.handle("GET", "/texts/note", None, f"Bearer {tokens['bob']}")[0] == 404
 
 
+def test_text_deletion_and_list() -> None:
+    """Task 4: deleting removes the name, a repeat is 404, the list stays sorted."""
+    service = Service()
+    account = {"username": "alice", "password": "password1"}
+    assert service.handle("POST", "/users", account, "")[0] == 201
+    token = service.handle("POST", "/sessions", account, "")[1]["data"]["token"]
+    auth = f"Bearer {token}"
+
+    assert service.handle("GET", "/texts", None, auth) == (200, {"data": []})
+    for name in ("delta", "alpha", "charlie"):
+        assert service.handle("PUT", f"/texts/{name}", {"text": name}, auth)[0] == 200
+    # The list is ordered by name, not by upload order.
+    assert service.handle("GET", "/texts", None, auth) == (
+        200,
+        {"data": ["alpha", "charlie", "delta"]},
+    )
+
+    assert service.handle("DELETE", "/texts/charlie", None, auth) == (200, {"data": None})
+    assert service.handle("GET", "/texts", None, auth) == (200, {"data": ["alpha", "delta"]})
+    assert service.handle("GET", "/texts/charlie", None, auth)[0] == 404
+    # Deleting again, or a name never uploaded, is 404 rather than 200.
+    assert service.handle("DELETE", "/texts/charlie", None, auth)[0] == 404
+    assert service.handle("DELETE", "/texts/never", None, auth)[0] == 404
+    # A valid token is still required, and the name is still checked first.
+    assert service.handle("DELETE", "/texts/alpha", None, "")[0] == 401
+    assert service.handle("DELETE", "/texts/n@me", None, auth)[0] == 400
+
+
+def test_text_deletion_is_isolated() -> None:
+    """Task 4: removing one account's copy leaves another account's copy intact."""
+    service = Service()
+    for name in ("alice", "bob"):
+        account = {"username": name, "password": "password1"}
+        assert service.handle("POST", "/users", account, "")[0] == 201
+    tokens = {
+        name: service.handle("POST", "/sessions", {"username": name, "password": "password1"}, "")[
+            1
+        ]["data"]["token"]
+        for name in ("alice", "bob")
+    }
+    for owner, text in (("alice", "alice text"), ("bob", "bob text")):
+        body = {"text": text}
+        assert service.handle("PUT", "/texts/note", body, f"Bearer {tokens[owner]}")[0] == 200
+
+    assert service.handle("DELETE", "/texts/note", None, f"Bearer {tokens['alice']}") == (
+        200,
+        {"data": None},
+    )
+    assert service.handle("GET", "/texts", None, f"Bearer {tokens['alice']}") == (200, {"data": []})
+    assert service.handle("GET", "/texts/note", None, f"Bearer {tokens['bob']}") == (
+        200,
+        {"data": "bob text"},
+    )
+    assert service.handle("GET", "/texts", None, f"Bearer {tokens['bob']}") == (
+        200,
+        {"data": ["note"]},
+    )
+
+
 def test_validation() -> None:
     service = Service()
     for body in (
