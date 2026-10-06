@@ -22,6 +22,28 @@ def test_app_uses_supplied_service() -> None:
         assert fresh.post("/sessions", json=account).status_code == 401
 
 
+def test_http_account_flow(client: TestClient) -> None:
+    """Task 1: the same account flow, seen through real HTTP requests."""
+    assert client.get("/ping").json() == {"data": "pong"}
+    account = {"username": "alice", "password": "password1"}
+    assert client.post("/users", json=account).status_code == 201
+    assert client.post("/users", json=account).status_code == 409
+    assert (
+        client.post("/sessions", json={**account, "password": "wrongpassword"}).status_code == 401
+    )
+
+    token = client.post("/sessions", json=account).json()["data"]["token"]
+    headers = {"Authorization": f"Bearer {token}"}
+    assert client.get("/texts", headers=headers).json() == {"data": []}
+
+    # A token without the Bearer prefix carries no identity.
+    assert client.get("/texts", headers={"Authorization": token}).status_code == 401
+    assert client.get("/texts").status_code == 401
+
+    assert client.delete("/sessions/current", headers=headers).status_code == 200
+    assert client.get("/texts", headers=headers).status_code == 401
+
+
 def test_http_routes(client: TestClient) -> None:
     assert client.get("/ping").status_code == 200
     response = client.post("/users", json={"username": "alice", "password": "password1"})
