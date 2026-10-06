@@ -45,6 +45,23 @@ async def test_http_account_flow(client: AsyncClient) -> None:
     assert (await client.get("/texts", headers=headers)).status_code == 401
 
 
+async def test_http_echo(client: AsyncClient) -> None:
+    """Task 2: echo over real HTTP, including Unicode and the empty string."""
+    response = await client.post("/echo", json={"text": "你好\nRM"})
+    assert response.status_code == 200
+    assert response.json() == {"data": "你好\nRM"}
+    assert (await client.post("/echo", json={"text": ""})).json() == {"data": ""}
+    assert (await client.post("/echo", json={"text": "a" * 65_536})).status_code == 200
+    assert (await client.post("/echo", json={"text": "a" * 65_537})).status_code == 413
+
+
+async def test_http_echo_rejects_bad_payloads(client: AsyncClient) -> None:
+    assert (await client.post("/echo", json={"text": 42})).status_code == 400
+    assert (await client.post("/echo", json={})).status_code == 400
+    assert (await client.post("/echo", json={"text": "a", "extra": "b"})).status_code == 400
+    assert (await client.post("/echo", content=b"not JSON")).status_code == 400
+
+
 async def test_http_routes(client: AsyncClient) -> None:
     assert (await client.get("/ping")).status_code == 200
     response = await client.post("/users", json={"username": "alice", "password": "password1"})
@@ -77,7 +94,7 @@ async def test_body_limit_and_routing(client: AsyncClient) -> None:
     assert (await client.post("/users", content=exact)).status_code == 400
     assert (await client.post("/users", content=exact + b" ")).status_code == 413
     assert (await client.get("/missing")).status_code == 404
-    assert (await client.get("/echo")).status_code == 404
+    assert (await client.get("/echo")).status_code == 405
     assert (await client.patch("/ping")).status_code == 405
     assert (await client.get("/ping?test=1")).json() == {"data": "pong"}
 
@@ -85,7 +102,6 @@ async def test_body_limit_and_routing(client: AsyncClient) -> None:
 @pytest.mark.parametrize(
     ("method", "path"),
     [
-        ("POST", "/echo"),
         ("DELETE", "/users/me"),
         ("PUT", "/texts/note"),
         ("GET", "/texts/note"),

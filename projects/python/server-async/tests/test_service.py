@@ -29,6 +29,27 @@ def test_token_header_forms() -> None:
         assert service.handle("GET", "/texts", None, header)[0] == 401
 
 
+def test_echo_round_trip() -> None:
+    """Task 2: echo returns the submitted text unchanged."""
+    service = Service()
+    for text in ("", "hello", "你好\nRM", "😀" * 100, "a" * 65_536):
+        assert service.handle("POST", "/echo", {"text": text}, "") == (200, {"data": text})
+
+
+def test_echo_rejects_bad_payloads() -> None:
+    """Task 2: only a single ``text`` string field is accepted."""
+    service = Service()
+    for body in (None, [], {}, {"text": 42}, {"text": "a", "extra": "b"}, {"text": "\ud800"}):
+        assert service.handle("POST", "/echo", body, "")[0] == 400
+
+
+def test_echo_limit_counts_bytes() -> None:
+    """Task 2: the cap is 65536 UTF-8 bytes, so fewer emoji than letters fit."""
+    service = Service()
+    assert service.handle("POST", "/echo", {"text": "😀" * 16_384}, "")[0] == 200
+    assert service.handle("POST", "/echo", {"text": "😀" * 16_385}, "")[0] == 413
+
+
 def test_validation() -> None:
     service = Service()
     for body in (
