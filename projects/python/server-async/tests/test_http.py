@@ -149,6 +149,32 @@ async def test_http_token_expiry(monkeypatch: pytest.MonkeyPatch) -> None:
         assert (await client.get("/texts", headers=headers)).status_code == 401
 
 
+async def test_http_error_matrix(client: AsyncClient) -> None:
+    """任务 7：真实 HTTP 上的错误状态码，以及失败之后服务仍然可用。"""
+    # 未知路径 404；已知路径用不支持的方法 405
+    assert (await client.get("/missing")).status_code == 404
+    assert (await client.patch("/ping")).status_code == 405
+    assert (await client.delete("/echo")).status_code == 405
+    # 文本超限 413；非 JSON 400
+    assert (await client.post("/echo", json={"text": "a" * 65_537})).status_code == 413
+    assert (
+        await client.post(
+            "/echo", content=b"not JSON", headers={"Content-Type": "application/json"}
+        )
+    ).status_code == 400
+    # 一连串失败之后，正常请求照常成功
+    assert (await client.get("/ping")).json() == {"data": "pong"}
+
+
+async def test_http_concurrent_requests(client: AsyncClient) -> None:
+    """任务 7：并发请求下，同名注册只有一个成功，其余是 409。"""
+    import asyncio
+
+    account = {"username": "alice", "password": "password1"}
+    responses = await asyncio.gather(*[client.post("/users", json=account) for _ in range(4)])
+    assert sorted(response.status_code for response in responses) == [201, 409, 409, 409]
+
+
 async def test_http_routes(client: AsyncClient) -> None:
     assert (await client.get("/ping")).status_code == 200
     response = await client.post("/users", json={"username": "alice", "password": "password1"})

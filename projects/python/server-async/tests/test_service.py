@@ -1,3 +1,5 @@
+from typing import Any
+
 import pytest
 
 from text_service.service import Service
@@ -191,7 +193,7 @@ def test_stale_login_cannot_touch_recreated_account(monkeypatch: pytest.MonkeyPa
     real_pbkdf2 = module.hashlib.pbkdf2_hmac
     triggered: list[bool] = []
 
-    def slow_pbkdf2(*args: object, **kwargs: object) -> bytes:
+    def slow_pbkdf2(*args: Any, **kwargs: Any) -> bytes:
         # 只在第一次进入时插桩：制造「旧登录还在算密码」这个时间窗口。
         # 这个窗口里账号被注销、并且有人用同名重新注册了一个新账号。
         if not triggered:
@@ -283,6 +285,75 @@ def test_logout_revokes_token_before_expiry() -> None:
         200,
         {"data": "hello"},
     )
+
+
+def test_error_status_matrix() -> None:
+    """任务 7：按「错误响应」一节逐条核对每个状态码。"""
+    service = Service()
+    account = {"username": "alice", "password": "password1"}
+    assert service.handle("POST", "/users", account, "")[0] == 201
+    token = service.handle("POST", "/sessions", account, "")[1]["data"]["token"]
+    auth = f"Bearer {token}"
+
+    # 400：字段缺失、类型不对、文本名不合法
+    assert service.handle("POST", "/users", {"username": "alice"}, "")[0] == 400
+    assert service.handle("PUT", "/texts/n@me", {"text": "x"}, auth)[0] == 400
+    assert service.handle("PUT", "/texts/note", {"text": 1}, auth)[0] == 400
+    # 401：密码错、令牌无效
+    wrong = {"username": "alice", "password": "wrongpassword"}
+    assert service.handle("POST", "/sessions", wrong, "")[0] == 401
+    assert service.handle("GET", "/texts", None, "Bearer ")[0] == 401
+    # 404：未知路径、当前用户没有这篇文本
+    assert service.handle("GET", "/missing", None, "")[0] == 404
+    assert service.handle("GET", "/texts/missing", None, auth)[0] == 404
+    # 405：路径已知但方法不支持
+    assert service.handle("PATCH", "/ping", None, "")[0] == 405
+    assert service.handle("DELETE", "/ping", None, "")[0] == 405
+    # 409：重复注册
+    assert service.handle("POST", "/users", account, "")[0] == 409
+    # 413：文本超过 65536 UTF-8 字节
+    assert service.handle("PUT", "/texts/note", {"text": "a" * 65_537}, auth)[0] == 413
+
+
+def test_concurrent_text_write_and_relogin() -> None:
+    """任务 7：写文本与「重新登录替换令牌」并发时，状态仍然一致。"""
+    from concurrent.futures import ThreadPoolExecutor
+
+    service = Service()
+    account = {"username": "alice", "password": "password1"}
+    assert service.handle("POST", "/users", account, "")[0] == 201
+    old_token = service.handle("POST", "/sessions", account, "")[1]["data"]["token"]
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        # 一个线程用旧令牌写文本，另一个线程重新登录（会把旧令牌换掉）
+        writer = pool.submit(
+            service.handle, "PUT", "/texts/note", {"text": "hello"}, f"Bearer {old_token}"
+        )
+        relogin = pool.submit(service.handle, "POST", "/sessions", account, "")
+        write_status = writer.result()[0]
+        new_token = relogin.result()[1]["data"]["token"]
+
+    # 无论谁先谁后：写成功就一定能列出来，写失败（401）就一定没有这篇
+    listing = service.handle("GET", "/texts", None, f"Bearer {new_token}")[1]["data"]
+    assert listing == (["note"] if write_status == 200 else [])
+    # 旧令牌已经被替换掉了
+    assert service.handle("GET", "/texts", None, f"Bearer {old_token}")[0] == 401
+
+
+def test_service_recovers_from_failed_requests() -> None:
+    """任务 7：单个请求失败不应打挂服务端，后续请求照常成功。"""
+    service = Service()
+    account = {"username": "alice", "password": "password1"}
+    # 先来一串失败请求：坏载荷、未知路径、错误方法、无效令牌
+    assert service.handle("POST", "/users", None, "")[0] == 400
+    assert service.handle("GET", "/missing", None, "")[0] == 404
+    assert service.handle("PATCH", "/ping", None, "")[0] == 405
+    assert service.handle("GET", "/texts", None, "Bearer nonsense")[0] == 401
+    # 之后正常请求依然全部可用
+    assert service.handle("GET", "/ping", None, "") == (200, {"data": "pong"})
+    assert service.handle("POST", "/users", account, "")[0] == 201
+    token = service.handle("POST", "/sessions", account, "")[1]["data"]["token"]
+    assert service.handle("GET", "/texts", None, f"Bearer {token}") == (200, {"data": []})
 
 
 def test_validation() -> None:
