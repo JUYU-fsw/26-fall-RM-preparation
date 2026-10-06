@@ -20,6 +20,7 @@ ROUTES = (
     ("POST", "/users"),
     ("POST", "/sessions"),
     ("DELETE", "/sessions/current"),
+    ("DELETE", "/users/me"),
     ("GET", "/texts"),
     ("PUT", "/texts/{name}"),
     ("GET", "/texts/{name}"),
@@ -155,12 +156,25 @@ class Service:
             return INVALID_NAME
         token = authorization.removeprefix("Bearer ") if authorization.startswith("Bearer ") else ""
         with self.lock:
-            user = next((u for u in self.users.values() if token and u.token == token), None)
-            if user is None:
+            # 连同用户名一起取出来：注销需要把整个账号从字典里删掉，
+            # 光拿到 user 对象不知道它挂在哪个名字下。
+            found = next(
+                ((name, u) for name, u in self.users.items() if token and u.token == token),
+                None,
+            )
+            if found is None:
                 return 401, {"message": "Login required"}
+            username, user = found
             # Later server task: check token expiry here, before reading or modifying state.
             if path == "/sessions/current" and method == "DELETE":
                 user.token = None
+                return 200, {"data": None}
+            if path == "/users/me" and method == "DELETE":
+                # 注销：把账号整个从表里删掉，它的文本和令牌随之一起消失。
+                # 这里必须是「删除这个账号」而不是「只把 token 清空」：
+                # 只清 token 的话，这个对象还留在 users 里，一个注销前发出、
+                # 此刻才算完密码的旧登录请求，仍能匹配到它并重新发令牌。
+                del self.users[username]
                 return 200, {"data": None}
             if path == "/texts" and method == "GET":
                 return 200, {"data": sorted(user.texts)}

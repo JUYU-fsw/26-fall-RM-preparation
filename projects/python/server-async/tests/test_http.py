@@ -101,6 +101,30 @@ async def test_http_text_deletion(client: AsyncClient) -> None:
     assert (await client.delete("/texts/beta")).status_code == 401
 
 
+async def test_http_account_deletion(client: AsyncClient) -> None:
+    """任务 5：通过真实 HTTP 注销账号，旧令牌失效，同名重新注册后是干净账号。"""
+    account = {"username": "alice", "password": "password1"}
+    await client.post("/users", json=account)
+    token = (await client.post("/sessions", json=account)).json()["data"]["token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    await client.put("/texts/note", headers=headers, json={"text": "hello"})
+    response = await client.delete("/users/me", headers=headers)
+    assert response.status_code == 200
+    assert response.json() == {"data": None}
+
+    # 旧令牌不能再用；没有令牌也不能注销
+    assert (await client.get("/texts", headers=headers)).status_code == 401
+    assert (await client.delete("/users/me")).status_code == 401
+
+    # 同名重新注册成功，而且看不到旧账号的任何文本
+    assert (await client.post("/users", json=account)).status_code == 201
+    new_token = (await client.post("/sessions", json=account)).json()["data"]["token"]
+    new_headers = {"Authorization": f"Bearer {new_token}"}
+    assert (await client.get("/texts", headers=new_headers)).json() == {"data": []}
+    assert (await client.get("/texts/note", headers=new_headers)).status_code == 404
+
+
 async def test_http_routes(client: AsyncClient) -> None:
     assert (await client.get("/ping")).status_code == 200
     response = await client.post("/users", json={"username": "alice", "password": "password1"})
@@ -138,14 +162,15 @@ async def test_body_limit_and_routing(client: AsyncClient) -> None:
     assert (await client.get("/ping?test=1")).json() == {"data": "pong"}
 
 
-@pytest.mark.parametrize(
-    ("method", "path"),
-    [
-        ("DELETE", "/users/me"),
-    ],
-)
-async def test_unimplemented_routes_are_absent(client: AsyncClient, method: str, path: str) -> None:
-    assert (await client.request(method, path)).status_code == 404
+async def test_unknown_path_is_not_found(client: AsyncClient) -> None:
+    """未知路径仍是 404。
+
+    起始代码里那条「未实现的路由应返回 404」的断言，已随路由逐条实现而移除：
+    /users/me 在任务 5 实现后，不带令牌请求它是 401（地方在，但你没资格），
+    不再是 404。所以这里改用真正不存在的路径来保留 404 的覆盖。
+    """
+    assert (await client.get("/missing")).status_code == 404
+    assert (await client.delete("/users/other")).status_code == 404
 
 
 @pytest.mark.parametrize("path", ["/ping", "/users", "/sessions", "/sessions/current", "/texts"])

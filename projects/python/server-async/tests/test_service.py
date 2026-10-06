@@ -1,3 +1,5 @@
+import pytest
+
 from text_service.service import Service
 
 
@@ -153,6 +155,78 @@ def test_text_deletion_is_isolated() -> None:
         200,
         {"data": ["note"]},
     )
+
+
+def test_account_deletion_clears_texts_and_token() -> None:
+    """任务 5：注销清掉账号本身、它的全部文本和令牌，同名可重新注册且是干净的。"""
+    service = Service()
+    account = {"username": "alice", "password": "password1"}
+    assert service.handle("POST", "/users", account, "")[0] == 201
+    token = service.handle("POST", "/sessions", account, "")[1]["data"]["token"]
+    auth = f"Bearer {token}"
+
+    assert service.handle("PUT", "/texts/note", {"text": "hello"}, auth)[0] == 200
+    assert service.handle("DELETE", "/users/me", None, auth) == (200, {"data": None})
+    # 旧令牌立刻失效：读列表、读文本、写文本全都不行
+    assert service.handle("GET", "/texts", None, auth)[0] == 401
+    assert service.handle("GET", "/texts/note", None, auth)[0] == 401
+    assert service.handle("PUT", "/texts/note", {"text": "again"}, auth)[0] == 401
+    # 账号已不存在，所以同名重新注册是 201 而不是 409
+    assert service.handle("POST", "/users", account, "")[0] == 201
+    new_token = service.handle("POST", "/sessions", account, "")[1]["data"]["token"]
+    new_auth = f"Bearer {new_token}"
+    assert service.handle("GET", "/texts", None, new_auth) == (200, {"data": []})
+    assert service.handle("GET", "/texts/note", None, new_auth)[0] == 404
+
+
+def test_stale_login_cannot_touch_recreated_account(monkeypatch: pytest.MonkeyPatch) -> None:
+    """任务 5：注销前发出、注销后才算完密码的登录，不能作用到同名的新账号上。"""
+    import text_service.service as module
+
+    service = Service()
+    account = {"username": "alice", "password": "password1"}
+    assert service.handle("POST", "/users", account, "")[0] == 201
+    token = service.handle("POST", "/sessions", account, "")[1]["data"]["token"]
+    auth = f"Bearer {token}"
+    real_pbkdf2 = module.hashlib.pbkdf2_hmac
+    triggered: list[bool] = []
+
+    def slow_pbkdf2(*args: object, **kwargs: object) -> bytes:
+        # 只在第一次进入时插桩：制造「旧登录还在算密码」这个时间窗口。
+        # 这个窗口里账号被注销、并且有人用同名重新注册了一个新账号。
+        if not triggered:
+            triggered.append(True)
+            assert service.handle("DELETE", "/users/me", None, auth) == (200, {"data": None})
+            assert service.handle("POST", "/users", account, "")[0] == 201
+        # 注册时也会走到这里，靠 triggered 保证只插桩一次，避免递归。
+        return real_pbkdf2(*args, **kwargs)
+
+    monkeypatch.setattr(module.hashlib, "pbkdf2_hmac", slow_pbkdf2)
+    # 这次登录拿到的是注销前的旧账号对象，所以即使密码正确也必须失败，
+    # 否则它就会给「同名的新账号」发一张令牌。
+    assert service.handle("POST", "/sessions", account, "")[0] == 401
+
+
+def test_concurrent_deletion_and_text_write() -> None:
+    """任务 5：注销与写文本并发时，写操作不会把已注销的账号「复活」。"""
+    from concurrent.futures import ThreadPoolExecutor
+
+    service = Service()
+    account = {"username": "alice", "password": "password1"}
+    assert service.handle("POST", "/users", account, "")[0] == 201
+    token = service.handle("POST", "/sessions", account, "")[1]["data"]["token"]
+    auth = f"Bearer {token}"
+    assert service.handle("PUT", "/texts/note", {"text": "hello"}, auth)[0] == 200
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        delete_job = pool.submit(service.handle, "DELETE", "/users/me", None, auth)
+        write_job = pool.submit(service.handle, "PUT", "/texts/note", {"text": "again"}, auth)
+        statuses = [delete_job.result()[0], write_job.result()[0]]
+    # 注销一定成功；写操作可能 200（抢在注销前）也可能 401（抢在注销后），
+    # 但无论先后顺序，账号都不会被重新建立起来。
+    assert statuses[0] == 200
+    assert statuses[1] in (200, 401)
+    assert "alice" not in service.users
 
 
 def test_validation() -> None:
