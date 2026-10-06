@@ -6,7 +6,11 @@ import re
 import secrets
 import threading
 from dataclasses import dataclass, field
+from time import monotonic
 from typing import Any
+
+# 令牌默认有效期（秒），可用 --token-ttl-seconds 覆盖。
+DEFAULT_TOKEN_TTL_SECONDS = 300.0
 
 # Texts are measured in UTF-8 bytes, not characters. Echo shares this limit.
 MAX_TEXT_BYTES = 65_536
@@ -94,13 +98,17 @@ class User:
     salt: bytes
     digest: bytes
     token: str | None = None
+    # 令牌的到期时刻，用 monotonic() 的读数表示；None 表示当前没有有效令牌。
+    expires_at: float | None = None
     texts: dict[str, str] = field(default_factory=dict)
 
 
 class Service:
-    def __init__(self) -> None:
+    def __init__(self, token_ttl_seconds: float = DEFAULT_TOKEN_TTL_SECONDS) -> None:
         self.users: dict[str, User] = {}
         self.lock = threading.Lock()
+        # 令牌有效期：登录后固定，后续任何操作都不会把它往后推。
+        self.token_ttl_seconds = token_ttl_seconds
 
     def handle(
         self, method: str, path: str, body: Any, authorization: str
@@ -148,8 +156,16 @@ class Service:
                 if self.users.get(name) is not user or not hmac.compare_digest(digest, expected):
                     return 401, {"message": "Invalid username or password"}
                 user.token = secrets.token_urlsafe(32)
-                # Later server task: record a deadline and return expires_in.
-                return 200, {"data": {"token": user.token}}
+                # 到期时刻 = 现在 + 有效期。用 monotonic 而不是墙上时钟，
+                # 这样系统时间被调整也不会让令牌提前或延后失效。
+                user.expires_at = monotonic() + self.token_ttl_seconds
+                # expires_in 告诉客户端这次令牌能用多久（整数秒）。
+                return 200, {
+                    "data": {
+                        "token": user.token,
+                        "expires_in": int(self.token_ttl_seconds),
+                    }
+                }
         # The text name is checked before authentication, matching the
         # reference program: an ill-formed name is 400 even without a token.
         if name is not None and not TEXT_NAME.fullmatch(name):
@@ -165,9 +181,13 @@ class Service:
             if found is None:
                 return 401, {"message": "Login required"}
             username, user = found
-            # Later server task: check token expiry here, before reading or modifying state.
+            # 到期即失效，而且这一路只是「检查」：读一次时钟，不会延长有效期。
+            if user.expires_at is None or monotonic() >= user.expires_at:
+                return 401, {"message": "Login required"}
             if path == "/sessions/current" and method == "DELETE":
+                # 退出：令牌和到期时刻一起清掉。
                 user.token = None
+                user.expires_at = None
                 return 200, {"data": None}
             if path == "/users/me" and method == "DELETE":
                 # 注销：把账号整个从表里删掉，它的文本和令牌随之一起消失。

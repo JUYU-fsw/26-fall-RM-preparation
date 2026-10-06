@@ -4,6 +4,7 @@ import pytest
 from httpx2 import ASGITransport, AsyncClient
 
 from text_service.server import create_app
+from text_service.service import Service
 
 pytestmark = pytest.mark.anyio
 
@@ -123,6 +124,29 @@ async def test_http_account_deletion(client: AsyncClient) -> None:
     new_headers = {"Authorization": f"Bearer {new_token}"}
     assert (await client.get("/texts", headers=new_headers)).json() == {"data": []}
     assert (await client.get("/texts/note", headers=new_headers)).status_code == 404
+
+
+async def test_http_token_expiry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """任务 6：到期令牌在真实 HTTP 请求上同样是 401。"""
+    import text_service.service as module
+
+    # 同样用假时钟控制「现在」
+    clock: dict[str, float] = {"now": 1_000.0}
+    monkeypatch.setattr(module, "monotonic", lambda: clock["now"])
+    app = create_app(Service(token_ttl_seconds=300))
+    account = {"username": "alice", "password": "password1"}
+    async with (
+        app.router.lifespan_context(app),
+        AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver") as client,
+    ):
+        await client.post("/users", json=account)
+        login = await client.post("/sessions", json=account)
+        assert login.json()["data"]["expires_in"] == 300
+        headers = {"Authorization": f"Bearer {login.json()['data']['token']}"}
+        assert (await client.get("/texts", headers=headers)).status_code == 200
+        # 时间跳过去
+        clock["now"] += 301
+        assert (await client.get("/texts", headers=headers)).status_code == 401
 
 
 async def test_http_routes(client: AsyncClient) -> None:

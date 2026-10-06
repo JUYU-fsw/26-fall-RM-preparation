@@ -229,6 +229,62 @@ def test_concurrent_deletion_and_text_write() -> None:
     assert "alice" not in service.users
 
 
+def test_token_expiry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """任务 6：令牌到期就失效，操作不续期，重新登录后旧数据仍在。"""
+    import text_service.service as module
+
+    # 假时钟：直接控制「现在是第几秒」，不用真等 300 秒。
+    clock: dict[str, float] = {"now": 1_000.0}
+    monkeypatch.setattr(module, "monotonic", lambda: clock["now"])
+    # 协议要求默认 300 秒
+    assert Service().token_ttl_seconds == 300
+    service = Service(token_ttl_seconds=300)
+    account = {"username": "alice", "password": "password1"}
+    assert service.handle("POST", "/users", account, "")[0] == 201
+    status, result = service.handle("POST", "/sessions", account, "")
+    assert status == 200
+    # 登录响应带上服务端配置的有效秒数
+    assert result["data"]["expires_in"] == 300
+    auth = f"Bearer {result['data']['token']}"
+    assert service.handle("PUT", "/texts/note", {"text": "hello"}, auth)[0] == 200
+
+    # 还差 1 秒到期：仍然有效
+    clock["now"] += 299
+    assert service.handle("GET", "/texts", None, auth)[0] == 200
+    # 上面这次读取不续期：再走 2 秒就过期了
+    clock["now"] += 2
+    assert service.handle("GET", "/texts", None, auth)[0] == 401
+    assert service.handle("GET", "/texts/note", None, auth)[0] == 401
+    assert service.handle("PUT", "/texts/note", {"text": "again"}, auth)[0] == 401
+    assert service.handle("DELETE", "/texts/note", None, auth)[0] == 401
+    assert service.handle("DELETE", "/sessions/current", None, auth)[0] == 401
+    assert service.handle("DELETE", "/users/me", None, auth)[0] == 401
+    # 重新登录拿到新令牌；之前写进去的文本还在——已完成的操作不会被撤销
+    new_token = service.handle("POST", "/sessions", account, "")[1]["data"]["token"]
+    assert service.handle("GET", "/texts/note", None, f"Bearer {new_token}") == (
+        200,
+        {"data": "hello"},
+    )
+
+
+def test_logout_revokes_token_before_expiry() -> None:
+    """任务 6：退出仍然能立刻撤销令牌，不必等到期。"""
+    service = Service(token_ttl_seconds=300)
+    account = {"username": "alice", "password": "password1"}
+    assert service.handle("POST", "/users", account, "")[0] == 201
+    token = service.handle("POST", "/sessions", account, "")[1]["data"]["token"]
+    auth = f"Bearer {token}"
+    assert service.handle("PUT", "/texts/note", {"text": "hello"}, auth)[0] == 200
+    assert service.handle("DELETE", "/sessions/current", None, auth)[0] == 200
+    # 退出后令牌立刻不可用；文本本身还留在账号里，重新登录后能读回
+    assert service.handle("GET", "/texts", None, auth)[0] == 401
+    new_token = service.handle("POST", "/sessions", account, "")[1]["data"]["token"]
+    assert service.handle("GET", "/texts/note", None, f"Bearer {new_token}") == (
+        200,
+        {"data": "hello"},
+    )
+
+
 def test_validation() -> None:
     service = Service()
     for body in (
