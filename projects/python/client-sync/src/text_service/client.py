@@ -4,6 +4,29 @@ from typing import Any
 
 import httpx
 
+# 多行文本的输入约定（协议允许"输入约定自行选择"，这是我们定的）：
+#   1. 单独一行 "." 表示输入结束
+#   2. 正文里某一行如果本身要以 "." 开头，就写成 ".." 开头（第一个点只当转义符）
+#   3. 行与行之间用换行符拼接，末尾不自动补换行 ——
+#      想让文本以换行结尾，就自己敲一个空行，再敲 "." 结束
+TEXT_HINT = '输入文本，单独一行 "." 结束；正文行首是 "." 时写成 ".."'
+END_MARK = "."
+
+
+def read_text() -> str:
+    """从终端读一段多行文本，按上面的约定把输入还原成原始内容。"""
+    print(TEXT_HINT)
+    lines: list[str] = []
+    while True:
+        line = input("| ")
+        # 单独一个点就是结束标记，不作为内容
+        if line == END_MARK:
+            break
+        # ".." 开头表示这一行的真实内容以 "." 开头，去掉第一个点
+        lines.append(line[1:] if line.startswith("..") else line)
+    # 用换行拼接，末尾不补换行：用户没敲就不加
+    return "\n".join(lines)
+
 
 def exchange(
     client: httpx.Client, method: str, path: str, token: str = "", body: object = None
@@ -46,7 +69,10 @@ def main() -> None:
                         "logout": ("DELETE", "/sessions/current"),
                         "list": ("GET", "/texts"),
                     }[command]
-                elif command in ("echo", "delete-user", "put", "get", "delete"):
+                elif command == "echo":
+                    body = {"text": read_text()}
+                    method, path = "POST", "/echo"
+                elif command in ("delete-user", "put", "get", "delete"):
                     print("This task is not implemented in the starting code yet.")
                     continue
                 else:

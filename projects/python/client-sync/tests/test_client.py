@@ -1,10 +1,11 @@
+import json
 import sys
 from typing import Any
 
 import httpx
 import pytest
 
-from text_service.client import exchange
+from text_service.client import exchange, read_text
 
 
 def test_exchange_omits_header_without_token() -> None:
@@ -90,6 +91,121 @@ def test_main_account_flow(monkeypatch: pytest.MonkeyPatch, capsys: pytest.Captu
         request.headers.get("Authorization") for request in seen if request.url.path == "/texts"
     ]
     assert texts == ["Bearer tok123", None]
+
+
+def test_read_text_joins_lines(monkeypatch: pytest.MonkeyPatch) -> None:
+    """任务 2：多行输入按换行拼接，末尾不自动补换行。"""
+    # 输入：第一行、第二行，然后单独一个 "." 结束
+    answers = iter(["第一行", "第二行", "."])
+    monkeypatch.setattr("builtins.input", lambda *args: next(answers))
+    assert read_text() == "第一行\n第二行"
+
+
+def test_read_text_escapes_leading_dot(monkeypatch: pytest.MonkeyPatch) -> None:
+    """任务 2：正文里以 "." 开头的行用 ".." 转义，能原样还原。"""
+    # ".." → "."，"..hidden" → ".hidden"；单独的 "." 仍然是结束标记
+    answers = iter(["..", "..hidden", "."])
+    monkeypatch.setattr("builtins.input", lambda *args: next(answers))
+    assert read_text() == ".\n.hidden"
+
+
+def test_read_text_supports_empty_and_blank_lines(monkeypatch: pytest.MonkeyPatch) -> None:
+    """任务 2：空字符串和"末尾换行"都要能表达。"""
+    # 直接结束 → 空文本
+    answers = iter(["."])
+    monkeypatch.setattr("builtins.input", lambda *args: next(answers))
+    assert read_text() == ""
+
+    # 内容后面再敲一个空行 → 文本以换行结尾（这就是"末尾换行"的表达方式）
+    answers = iter(["a", "", "."])
+    monkeypatch.setattr("builtins.input", lambda *args: next(answers))
+    assert read_text() == "a\n"
+
+    # 中间夹空行也要保留
+    answers = iter(["a", "", "b", "."])
+    monkeypatch.setattr("builtins.input", lambda *args: next(answers))
+    assert read_text() == "a\n\nb"
+
+    # 两个空行 → 文本本身就是一个换行符
+    answers = iter(["", "", "."])
+    monkeypatch.setattr("builtins.input", lambda *args: next(answers))
+    assert read_text() == "\n"
+
+
+def test_read_text_keeps_unicode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """任务 2：中文、emoji 都要能原样读完。"""
+    answers = iter(["你好 RM 😀", "."])
+    monkeypatch.setattr("builtins.input", lambda *args: next(answers))
+    assert read_text() == "你好 RM 😀"
+
+
+def test_main_echo_sends_text_and_prints_result(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """任务 2：echo 命令把输入放进 text 字段发出去，并显示服务器回显的内容。"""
+    import text_service.client as module
+
+    seen: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        # 模拟服务端原样回显：收到什么就返回什么
+        payload = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(200, json={"data": payload["text"]})
+
+    real_client = httpx.Client
+
+    def fake_client(*args: Any, **kwargs: Any) -> httpx.Client:
+        kwargs["transport"] = httpx.MockTransport(respond)
+        return real_client(*args, **kwargs)
+
+    monkeypatch.setattr(module.httpx, "Client", fake_client)
+    monkeypatch.setattr(sys, "argv", ["rm-client"])
+    # echo 后进入多行输入：两行内容 + 一个转义行，然后 "." 结束；最后 q 退出
+    answers = iter(["echo", "第一行", "..以点开头", ".", "q"])
+    monkeypatch.setattr("builtins.input", lambda *args: next(answers))
+
+    module.main()
+    output = capsys.readouterr().out
+
+    # 请求确实是 POST /echo，正文就是那三行拼起来的内容
+    assert len(seen) == 1
+    assert seen[0].method == "POST"
+    assert seen[0].url.path == "/echo"
+    assert json.loads(seen[0].content.decode("utf-8")) == {"text": "第一行\n.以点开头"}
+    # 回显结果打印出来了（状态码 200 + 内容）
+    assert "200" in output
+    assert "第一行" in output
+    # 输入提示也要出现，用户才知道怎么结束输入
+    assert '"."' in output
+
+
+def test_main_echo_sends_empty_text(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """任务 2：空文本也要能发出去（直接敲 "." 结束）。"""
+    import text_service.client as module
+
+    seen: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={"data": ""})
+
+    real_client = httpx.Client
+
+    def fake_client(*args: Any, **kwargs: Any) -> httpx.Client:
+        kwargs["transport"] = httpx.MockTransport(respond)
+        return real_client(*args, **kwargs)
+
+    monkeypatch.setattr(module.httpx, "Client", fake_client)
+    monkeypatch.setattr(sys, "argv", ["rm-client"])
+    answers = iter(["echo", ".", "q"])
+    monkeypatch.setattr("builtins.input", lambda *args: next(answers))
+
+    module.main()
+    assert json.loads(seen[0].content.decode("utf-8")) == {"text": ""}
+    assert "200 {'data': ''}" in capsys.readouterr().out
 
 
 def test_request() -> None:
