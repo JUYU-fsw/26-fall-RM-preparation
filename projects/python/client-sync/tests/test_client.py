@@ -456,3 +456,120 @@ def test_main_get_missing_text_shows_404(
     )
     # 读到不存在的文本，屏幕要显示 404
     assert "404 {'message': 'Text not found'}" in output
+
+
+def test_main_delete_user_clears_local_token(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """任务 5：注销成功后本地令牌被清除，后续受保护请求因没令牌而 401。"""
+    seen: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        path = request.url.path
+        if path == "/users":
+            return httpx.Response(201, json={"data": {"username": "alice"}})
+        if path == "/sessions":
+            return httpx.Response(200, json={"data": {"token": "tok123"}})
+        if path == "/users/me":
+            # 注销成功：账号与令牌在服务端被删
+            return httpx.Response(200, json={"data": None})
+        if path == "/texts":
+            # 没有令牌（或令牌无效）一律 401
+            if "Authorization" not in request.headers:
+                return httpx.Response(401, json={"message": "Login required"})
+            return httpx.Response(200, json={"data": []})
+        return httpx.Response(404, json={"message": "Not found"})
+
+    seen, output = _run_main(
+        monkeypatch,
+        capsys,
+        respond,
+        ["register", "alice", "login", "alice", "delete-user", "list", "q"],
+    )
+
+    # 注销请求确实是 DELETE /users/me
+    delete_user = [req for req in seen if req.method == "DELETE" and req.url.path == "/users/me"]
+    assert len(delete_user) == 1
+    # 注销后发出的 list 不再带令牌（本地 token 已被清空）
+    text_requests = [req for req in seen if req.url.path == "/texts"]
+    assert text_requests[-1].headers.get("Authorization") is None
+    # 屏幕提示重新登录
+    assert "401 {'message': 'Login required'}" in output
+    assert "Please log in again." in output
+
+
+def test_main_reregister_same_name_has_empty_list(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """任务 5：注销会删掉账号与文本；同名重新注册、登录后列表应为空。"""
+    # 模拟服务端状态：账号 -> 文本；token -> 账号
+    accounts: dict[str, dict[str, str]] = {}
+    token_for: dict[str, str] = {}
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/users":
+            username = json.loads(request.content.decode("utf-8"))["username"]
+            accounts[username] = {}  # 新账号，文本先为空
+            return httpx.Response(201, json={"data": {"username": username}})
+        if path == "/sessions":
+            username = json.loads(request.content.decode("utf-8"))["username"]
+            token = "tok_" + username
+            token_for[token] = username
+            return httpx.Response(200, json={"data": {"token": token}})
+        if path == "/users/me":
+            # 注销：删账号（含文本）+ 作废令牌
+            token = request.headers.get("Authorization", "").removeprefix("Bearer ")
+            user = token_for.pop(token, None)
+            if user is not None:
+                accounts.pop(user, None)
+            return httpx.Response(200, json={"data": None})
+        if path == "/texts":
+            token = request.headers.get("Authorization", "").removeprefix("Bearer ")
+            user = token_for.get(token)
+            if user is None:
+                return httpx.Response(401, json={"message": "Login required"})
+            return httpx.Response(200, json={"data": sorted(accounts[user])})
+        if path.startswith("/texts/"):
+            token = request.headers.get("Authorization", "").removeprefix("Bearer ")
+            user = token_for.get(token)
+            if user is None:
+                return httpx.Response(401, json={"message": "Login required"})
+            name = path.removeprefix("/texts/")
+            if request.method == "PUT":
+                accounts[user][name] = json.loads(request.content.decode("utf-8"))["text"]
+                return httpx.Response(200, json={"data": None})
+            if name in accounts[user]:
+                return httpx.Response(200, json={"data": accounts[user][name]})
+            return httpx.Response(404, json={"message": "Text not found"})
+        return httpx.Response(404, json={"message": "Not found"})
+
+    _seen, output = _run_main(
+        monkeypatch,
+        capsys,
+        respond,
+        [
+            "register",
+            "alice",  # 第一次注册
+            "login",
+            "alice",  # 登录
+            "put",
+            "note",
+            "内容",
+            ".",  # 上传一个文本
+            "list",  # 注销前：列表应有 note
+            "delete-user",  # 注销（删账号 + 文本）
+            "register",
+            "alice",  # 同名重新注册（新账号）
+            "login",
+            "alice",  # 重新登录
+            "list",  # 注销后重注册：列表应为空
+            "q",
+        ],
+    )
+
+    # 注销前列表含 note
+    assert "200 {'data': ['note']}" in output
+    # 同名重注册、重新登录后，列表应为空（旧数据已被注销清除）
+    assert "200 {'data': []}" in output

@@ -84,8 +84,8 @@ def main() -> None:
                     # 删除只需要名字：拼进路径，不需要请求体；令牌由 exchange 自动带上
                     method, path = "DELETE", f"/texts/{input('name: ')}"
                 elif command == "delete-user":
-                    print("This task is not implemented in the starting code yet.")
-                    continue
+                    # 注销：删除当前账号（含其全部文本与令牌），不需要额外的名字
+                    method, path = "DELETE", "/users/me"
                 else:
                     print("Unknown command.")
                     continue
@@ -96,7 +96,8 @@ def main() -> None:
                         token = result["data"]["token"]
                     if status == 401:
                         print("Please log in again.")
-                    if status == 401 or (command == "logout" and status == 200):
+                    # 登出或注销成功都要清空本地令牌；401（令牌失效）同样清空
+                    if status == 401 or (command in ("logout", "delete-user") and status == 200):
                         token = ""
                 except (httpx.HTTPError, ValueError, KeyError) as exc:
                     print(f"Request failed: {exc}")
