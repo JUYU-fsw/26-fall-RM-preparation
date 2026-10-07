@@ -153,9 +153,7 @@ class Service:
         # reference program: an ill-formed name is 400 even without a token.
         if name is not None and not TEXT_NAME.fullmatch(name):
             return INVALID_NAME
-        token = (
-            authorization.removeprefix("Bearer ") if authorization.startswith("Bearer ") else ""
-        )
+        token = authorization.removeprefix("Bearer ") if authorization.startswith("Bearer ") else ""
         with self.lock:
             user = next((u for u in self.users.values() if token and u.token == token), None)
             if user is None:

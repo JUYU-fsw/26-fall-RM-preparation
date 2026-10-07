@@ -375,7 +375,7 @@ def test_main_delete_updates_list(
         if path.startswith("/texts/"):
             # 文本接口同样要先验令牌
             if "Authorization" not in request.headers:
-                return httpx.Response(401, {"message": "Login required"})
+                return httpx.Response(401, json={"message": "Login required"})
             name = path.removeprefix("/texts/")
             if request.method == "PUT":
                 # 上传：把文本存进 store（同名直接覆盖）
