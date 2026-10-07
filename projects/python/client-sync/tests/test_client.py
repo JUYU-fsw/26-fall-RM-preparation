@@ -573,3 +573,98 @@ def test_main_reregister_same_name_has_empty_list(
     assert "200 {'data': ['note']}" in output
     # 同名重注册、重新登录后，列表应为空（旧数据已被注销清除）
     assert "200 {'data': []}" in output
+
+
+def test_exchange_reports_status_for_empty_body() -> None:
+    """任务 6：响应体缺失（如 204 无内容）时，状态码仍然要能拿到。"""
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(204)  # 没有响应体
+
+    with httpx.Client(
+        base_url="http://localhost", transport=httpx.MockTransport(respond)
+    ) as client:
+        status, result = exchange(client, "DELETE", "/users/me", "example")
+        assert status == 204
+        # 空 body 不是 JSON，回退成 message=空字符串，而不是崩溃
+        assert result == {"message": ""}
+
+
+def test_main_network_errors_continue(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """任务 6：连接错误与超时都属于网络错误，都应被捕获且命令循环继续。"""
+
+    # 前两次请求分别模拟"连不上"和"超时"，之后恢复正常，用来证明一次失败不会让程序退出
+    errors = [httpx.ConnectError("connection refused"), httpx.TimeoutException("timed out")]
+    calls = {"n": 0}
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        i = calls["n"]
+        calls["n"] += 1
+        if i < len(errors):
+            raise errors[i]
+        return httpx.Response(200, json={"data": "pong"})
+
+    _seen, output = _run_main(
+        monkeypatch,
+        capsys,
+        respond,
+        ["ping", "ping", "ping", "q"],
+    )
+    # 两次网络错误都被捕获并提示，而不是让程序崩掉
+    assert output.count("Request failed") == 2
+    # 错误之后还能继续：最后一次 ping 拿到了 200
+    assert "200 {'data': 'pong'}" in output
+
+
+def test_main_ctrl_c_exits_cleanly(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """任务 6：常规 Ctrl-C（input 抛 KeyboardInterrupt）应当干净退出，不把异常冒泡出来。"""
+    import text_service.client as module
+
+    # 第一次读取命令就模拟用户按了 Ctrl-C
+    def raise_keyboard_interrupt(*args: Any) -> str:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("builtins.input", raise_keyboard_interrupt)
+    monkeypatch.setattr(sys, "argv", ["rm-client"])
+
+    # 顶掉 httpx.Client，避免真的去连网（Ctrl-C 发生在发请求之前）
+    real_client = httpx.Client
+
+    def fake_client(*args: Any, **kwargs: Any) -> httpx.Client:
+        return real_client(*args, **kwargs)
+
+    monkeypatch.setattr(module.httpx, "Client", fake_client)
+
+    # 关键：main() 必须正常返回（KeyboardInterrupt 被内部 except 接住），不能冒泡出来
+    module.main()
+    # 退出时打印了一个换行（对应 except 分支里的 print()）
+    assert capsys.readouterr().out == "\n"
+
+
+def test_main_sets_finite_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """任务 6：客户端使用有限超时（timeout 不是 None），避免无限等待。"""
+    import text_service.client as module
+
+    captured: dict[str, Any] = {}
+    real_client = httpx.Client
+
+    def fake_client(*args: Any, **kwargs: Any) -> httpx.Client:
+        captured.update(kwargs)
+        return real_client(*args, **kwargs)
+
+    monkeypatch.setattr(module.httpx, "Client", fake_client)
+    monkeypatch.setattr(sys, "argv", ["rm-client"])
+
+    # 立刻 Ctrl-C，避免真的发请求
+    def raise_keyboard_interrupt(*args: Any) -> str:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("builtins.input", raise_keyboard_interrupt)
+
+    module.main()
+    # timeout 不是 None 即代表设定了上限（None 在 httpx 里表示不限制，会无限等）
+    assert captured.get("timeout") is not None
