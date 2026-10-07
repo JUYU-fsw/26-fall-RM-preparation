@@ -80,7 +80,10 @@ def main() -> None:
                 elif command == "get":
                     # 读取只需要名字，请求体为空，令牌由 exchange 自动带上
                     method, path = "GET", f"/texts/{input('name: ')}"
-                elif command in ("delete-user", "delete"):
+                elif command == "delete":
+                    # 删除只需要名字：拼进路径，不需要请求体；令牌由 exchange 自动带上
+                    method, path = "DELETE", f"/texts/{input('name: ')}"
+                elif command == "delete-user":
                     print("This task is not implemented in the starting code yet.")
                     continue
                 else:

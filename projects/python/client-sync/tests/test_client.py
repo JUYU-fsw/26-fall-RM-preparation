@@ -351,3 +351,108 @@ def test_request() -> None:
         base_url="http://localhost", transport=httpx.MockTransport(respond)
     ) as client:
         assert exchange(client, "GET", "/texts", "example") == (200, {"data": []})
+
+
+def test_main_delete_updates_list(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """任务 4：删除后列表里不再有该名称；重复删除同一个不存在的名称返回 404。"""
+    store: dict[str, str] = {}
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/users":
+            return httpx.Response(201, json={"data": {"username": "alice"}})
+        if path == "/sessions":
+            return httpx.Response(200, json={"data": {"token": "tok123"}})
+        if path == "/sessions/current":
+            return httpx.Response(200, json={"data": None})
+        if path == "/texts":
+            # 受保护接口：没有令牌一律 401；有令牌则返回按名称升序的列表
+            if "Authorization" not in request.headers:
+                return httpx.Response(401, json={"message": "Login required"})
+            return httpx.Response(200, json={"data": sorted(store)})
+        if path.startswith("/texts/"):
+            # 文本接口同样要先验令牌
+            if "Authorization" not in request.headers:
+                return httpx.Response(401, {"message": "Login required"})
+            name = path.removeprefix("/texts/")
+            if request.method == "PUT":
+                # 上传：把文本存进 store（同名直接覆盖）
+                store[name] = json.loads(request.content.decode("utf-8"))["text"]
+                return httpx.Response(200, json={"data": None})
+            if request.method == "DELETE":
+                # 删得掉才删，删不掉（不存在）就 404
+                if name in store:
+                    del store[name]
+                    return httpx.Response(200, json={"data": None})
+                return httpx.Response(404, json={"message": "Text not found"})
+            if name in store:
+                return httpx.Response(200, json={"data": store[name]})
+            return httpx.Response(404, json={"message": "Text not found"})
+        return httpx.Response(404, json={"message": "Not found"})
+
+    seen, output = _run_main(
+        monkeypatch,
+        capsys,
+        respond,
+        [
+            "register",
+            "alice",  # 注册
+            "login",
+            "alice",  # 登录拿令牌
+            "put",
+            "note",
+            "内容",
+            ".",  # 上传一个文本
+            "list",  # 列表里应有 note
+            "delete",
+            "note",  # 删除它
+            "list",  # 列表应变空
+            "delete",
+            "note",  # 再删一次 → 404
+            "q",
+        ],
+    )
+
+    # 删成功了：store 里不再有 note
+    assert store == {}
+    # 删除前列表含 note，删除后列表为空
+    assert "200 {'data': ['note']}" in output
+    assert "200 {'data': []}" in output
+    # 重复删除不存在的名称返回 404
+    assert "404 {'message': 'Text not found'}" in output
+
+    # 确认真的发了两条 DELETE 请求到 /texts/note
+    delete_requests = [
+        req for req in seen if req.method == "DELETE" and req.url.path == "/texts/note"
+    ]
+    assert len(delete_requests) == 2
+
+
+def test_main_get_missing_text_shows_404(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """任务 4：获取不存在的文本时，屏幕要显示 404。"""
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/users":
+            return httpx.Response(201, json={"data": {"username": "alice"}})
+        if path == "/sessions":
+            return httpx.Response(200, json={"data": {"token": "tok123"}})
+        if path.startswith("/texts"):
+            # 任何文本请求都先验令牌；这里故意让文本不存在，统一返回 404
+            if "Authorization" not in request.headers:
+                return httpx.Response(401, json={"message": "Login required"})
+            return httpx.Response(404, json={"message": "Text not found"})
+        return httpx.Response(404, json={"message": "Not found"})
+
+    _, output = _run_main(
+        monkeypatch,
+        capsys,
+        respond,
+        ["register", "alice", "login", "alice", "get", "ghost", "q"],
+    )
+    # 读到不存在的文本，屏幕要显示 404
+    assert "404 {'message': 'Text not found'}" in output
