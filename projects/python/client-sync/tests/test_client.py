@@ -208,6 +208,139 @@ def test_main_echo_sends_empty_text(
     assert "200 {'data': ''}" in capsys.readouterr().out
 
 
+def _run_main(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+    respond: Any,
+    answers: list[str],
+) -> tuple[list[httpx.Request], str]:
+    """小工具：用假服务端跑一遍 main()，返回（收到的请求，屏幕输出）。"""
+    import text_service.client as module
+
+    seen: list[httpx.Request] = []
+
+    def record(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return respond(request)
+
+    real_client = httpx.Client
+
+    def fake_client(*args: Any, **kwargs: Any) -> httpx.Client:
+        kwargs["transport"] = httpx.MockTransport(record)
+        return real_client(*args, **kwargs)
+
+    monkeypatch.setattr(module.httpx, "Client", fake_client)
+    # main() 会读 sys.argv，pytest 自己的参数会让它报错
+    monkeypatch.setattr(sys, "argv", ["rm-client"])
+    # 按顺序喂给 input()；密码走 getpass，单独顶掉
+    queue = iter(answers)
+    monkeypatch.setattr("builtins.input", lambda *args: next(queue))
+    monkeypatch.setattr(module.getpass, "getpass", lambda *args: "password1")
+
+    module.main()
+    return seen, capsys.readouterr().out
+
+
+def test_main_text_round_trip(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """任务 3：put 上传、同名覆盖，get 读回的必须是最新内容；退出后不能再读。"""
+    # 假服务端：真的把文本存起来，这样才验得到"覆盖后读回新内容"
+    store: dict[str, str] = {}
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/users":
+            return httpx.Response(201, json={"data": {"username": "alice"}})
+        if path == "/sessions":
+            return httpx.Response(200, json={"data": {"token": "tok123"}})
+        if path == "/sessions/current":
+            return httpx.Response(200, json={"data": None})
+        if path.startswith("/texts/"):
+            # 受保护接口：没有令牌一律 401
+            if "Authorization" not in request.headers:
+                return httpx.Response(401, json={"message": "Login required"})
+            name = path.removeprefix("/texts/")
+            if request.method == "PUT":
+                store[name] = json.loads(request.content.decode("utf-8"))["text"]
+                return httpx.Response(200, json={"data": None})
+            if name in store:
+                return httpx.Response(200, json={"data": store[name]})
+            return httpx.Response(404, json={"message": "Text not found"})
+        return httpx.Response(404, json={"message": "Not found"})
+
+    seen, output = _run_main(
+        monkeypatch,
+        capsys,
+        respond,
+        [
+            "register",
+            "alice",  # 注册
+            "login",
+            "alice",  # 登录拿令牌
+            "put",
+            "note",
+            "第一版",
+            ".",  # 上传第一版
+            "put",
+            "note",
+            "第二版",
+            ".",  # 同名覆盖
+            "get",
+            "note",  # 读回
+            "logout",  # 退出
+            "get",
+            "note",  # 退出后再读
+            "q",
+        ],
+    )
+
+    # 同名上传是覆盖，不是追加：最后只剩第二版
+    assert store == {"note": "第二版"}
+    # 读回的内容显示在屏幕上
+    assert "200 {'data': '第二版'}" in output
+
+    # 四次文本请求：两次 PUT、两次 GET，都打在 /texts/note 上
+    text_requests = [request for request in seen if request.url.path == "/texts/note"]
+    assert [request.method for request in text_requests] == ["PUT", "PUT", "GET", "GET"]
+    # 前三次带着令牌（登录后），最后一次不带（退出后）
+    assert [request.headers.get("Authorization") for request in text_requests] == [
+        "Bearer tok123",
+        "Bearer tok123",
+        "Bearer tok123",
+        None,
+    ]
+    # 退出后读取是 401，并提示重新登录
+    assert "401 {'message': 'Login required'}" in output
+    assert "Please log in again." in output
+
+
+def test_main_put_without_token_is_rejected(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """任务 3：没登录就 put，服务端返回 401，什么也没存下。"""
+    store: dict[str, str] = {}
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.path.startswith("/texts/"):
+            if "Authorization" not in request.headers:
+                return httpx.Response(401, json={"message": "Login required"})
+            store["note"] = json.loads(request.content.decode("utf-8"))["text"]
+            return httpx.Response(200, json={"data": None})
+        return httpx.Response(404, json={"message": "Not found"})
+
+    seen, output = _run_main(monkeypatch, capsys, respond, ["put", "note", "内容", ".", "q"])
+
+    # 请求确实发出去了：名字拼进了路径，文本放进请求体
+    assert seen[0].method == "PUT"
+    assert seen[0].url.path == "/texts/note"
+    assert json.loads(seen[0].content.decode("utf-8")) == {"text": "内容"}
+    # 但没有令牌，服务端什么都没存下
+    assert "Authorization" not in seen[0].headers
+    assert store == {}
+    assert "401 {'message': 'Login required'}" in output
+
+
 def test_request() -> None:
     def respond(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/texts"

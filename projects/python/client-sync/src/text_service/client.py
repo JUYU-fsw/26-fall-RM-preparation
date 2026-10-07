@@ -72,7 +72,15 @@ def main() -> None:
                 elif command == "echo":
                     body = {"text": read_text()}
                     method, path = "POST", "/echo"
-                elif command in ("delete-user", "put", "get", "delete"):
+                elif command == "put":
+                    # 先问名字，再读多行文本；名字拼进路径，文本放进请求体
+                    name = input("name: ")
+                    body = {"text": read_text()}
+                    method, path = "PUT", f"/texts/{name}"
+                elif command == "get":
+                    # 读取只需要名字，请求体为空，令牌由 exchange 自动带上
+                    method, path = "GET", f"/texts/{input('name: ')}"
+                elif command in ("delete-user", "delete"):
                     print("This task is not implemented in the starting code yet.")
                     continue
                 else:
